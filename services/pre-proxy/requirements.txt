@@ -1,0 +1,6 @@
+fastapi==0.115.6
+uvicorn[standard]==0.30.6
+pydantic
+
+umbral-pre==0.11.0
+web3==7.16.0

@@ -1,0 +1,283 @@
+name: zk-pre-healthcare
+
+# In the UI, `owner` is the Patient and `provider` the Health Care Provider.
+
+# ---------------------------------------------------------------------------
+# Least-privilege networks (paper §5.5):
+#   net-public   owner, provider                           host port publishing
+#   net-storage  owner, provider, minio, minio-init        blob I/O
+#   net-pre      owner, provider, pre-proxy-1/2/3          kfrag intake, cfrag exchange
+#   net-ledger   owner, provider, pre-proxy-1/2/3, ledger  transactions, live reads
+#   net-admin    minio                                     MinIO dashboard
+#
+# minio cannot reach the ledger or proxies; proxies cannot reach minio.
+# Proxies read the ledger themselves but hold no Ethereum key, so cannot write.
+# No orchestrator sits between the actors and the ledger (R6).
+# Only minio and minio-init get the MinIO root credentials. Each client gets its
+# own user and starts only after minio-init succeeds.
+# ---------------------------------------------------------------------------
+
+networks:
+  net-public:
+    driver: bridge
+    # Not internal: Docker publishes no ports if all of a container's networks are
+    # internal (moby/moby#36174). Exists only for the owner/provider port mappings.
+  net-pre:
+    driver: bridge
+    internal: true        # no internet egress needed for re-encryption workers
+  net-storage:
+    driver: bridge
+    internal: true        # minio never needs to phone out
+  net-ledger:
+    driver: bridge
+    internal: true        # local hardhat chain, no external RPC needed
+  net-admin:
+    driver: bridge
+    # Not internal, same reason. Only minio joins, for the dashboard.
+
+# The ledger and proxies are on internal networks only: unreachable from outside.
+
+volumes:
+  minio-data:
+  ledger-data:
+  owner-identity:
+  provider-identity:
+
+x-pre-proxy-common: &pre-proxy-common
+  build:
+    context: ./services/pre-proxy
+  networks:
+    - net-pre
+    - net-ledger
+  expose:
+    - "9001"
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  volumes:
+    - ledger-data:/app/ledger-deployment:ro
+  environment:
+    PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+    PRE_SHARES: ${PRE_SHARES:-3}
+    LEDGER_RPC_URL: http://ledger:8545
+    LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+  depends_on:
+    ledger:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+
+services:
+
+  # ---------------------------------------------------------------- owner --
+  owner:
+    build:
+      context: ./services/owner
+    container_name: owner
+    hostname: owner
+    networks:
+      - net-public
+      - net-pre
+      - net-storage
+      - net-ledger
+    ports:
+      - "8501:8501"          # streamlit GUI, host-exposed
+    volumes:
+      - ledger-data:/app/ledger-deployment:ro
+      - owner-identity:/app/identity
+    environment:
+      APP_ROLE: owner
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${OWNER_MINIO_USER:?set OWNER_MINIO_USER in .env}
+      MINIO_SECRET_KEY: ${OWNER_MINIO_PASSWORD:?set OWNER_MINIO_PASSWORD in .env}
+      PRE_PROXY_ENDPOINTS: pre-proxy-1:9001,pre-proxy-2:9001,pre-proxy-3:9001
+      LEDGER_RPC_URL: http://ledger:8545
+      LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+      OWNER_ETH_PRIVATE_KEY: ${OWNER_ETH_PRIVATE_KEY}
+      PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+      PRE_SHARES: ${PRE_SHARES:-3}
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      ledger:
+        condition: service_healthy
+      pre-proxy-1:
+        condition: service_healthy
+      pre-proxy-2:
+        condition: service_healthy
+      pre-proxy-3:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # ------------------------------------------------------------- provider --
+  provider:
+    build:
+      context: ./services/provider
+    container_name: provider
+    hostname: provider
+    networks:
+      - net-public
+      - net-pre
+      - net-storage
+      - net-ledger
+    ports:
+      - "8502:8501"          # streamlit GUI, host-exposed on a different port
+    volumes:
+      - ledger-data:/app/ledger-deployment:ro
+      - provider-identity:/app/identity
+    environment:
+      APP_ROLE: provider
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${PROVIDER_MINIO_USER:?set PROVIDER_MINIO_USER in .env}
+      MINIO_SECRET_KEY: ${PROVIDER_MINIO_PASSWORD:?set PROVIDER_MINIO_PASSWORD in .env}
+      PRE_PROXY_ENDPOINTS: pre-proxy-1:9001,pre-proxy-2:9001,pre-proxy-3:9001
+      PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+      LEDGER_RPC_URL: http://ledger:8545
+      LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+      PROVIDER_ETH_PRIVATE_KEY: ${PROVIDER_ETH_PRIVATE_KEY}
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      ledger:
+        condition: service_healthy
+      pre-proxy-1:
+        condition: service_healthy
+      pre-proxy-2:
+        condition: service_healthy
+      pre-proxy-3:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # ------------------------------------------------ proxy re-encryption ---
+  # Threshold m-of-n (default 2-of-3): no single node can reconstruct access.
+  pre-proxy-1:
+    <<: *pre-proxy-common
+    container_name: pre-proxy-1
+    hostname: pre-proxy-1
+    environment:
+      PROXY_ID: "1"
+      PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+      PRE_SHARES: ${PRE_SHARES:-3}
+      LEDGER_RPC_URL: http://ledger:8545
+      LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+
+  pre-proxy-2:
+    <<: *pre-proxy-common
+    container_name: pre-proxy-2
+    hostname: pre-proxy-2
+    environment:
+      PROXY_ID: "2"
+      PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+      PRE_SHARES: ${PRE_SHARES:-3}
+      LEDGER_RPC_URL: http://ledger:8545
+      LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+
+  pre-proxy-3:
+    <<: *pre-proxy-common
+    container_name: pre-proxy-3
+    hostname: pre-proxy-3
+    environment:
+      PROXY_ID: "3"
+      PRE_THRESHOLD: ${PRE_THRESHOLD:-2}
+      PRE_SHARES: ${PRE_SHARES:-3}
+      LEDGER_RPC_URL: http://ledger:8545
+      LEDGER_DEPLOYMENT_FILE: /app/ledger-deployment/AccessControl.json
+
+  # ---------------------------------------------------------------- minio --
+  minio:
+    image: docker.io/pgsty/minio:latest
+    container_name: minio
+    hostname: minio
+    networks:
+      - net-storage
+      - net-admin
+    expose:
+      - "9000"                # S3 API, reachable only from owner/provider (net-storage)
+      - "9090"                # web console
+    ports:
+      # Dashboard, loopback only; drop "127.0.0.1:" to publish on every interface.
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9090}:9090"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    command: server /data --console-address ":9090"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # ----------------------------------------------------------- minio-init --
+  # One-shot: creates the bucket and client users, then checks their policies.
+  # If it fails, owner and provider do not start.
+  minio-init:
+    image: docker.io/pgsty/mc:latest
+    container_name: minio-init
+    hostname: minio-init
+    networks:
+      - net-storage
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    volumes:
+      - ./services/minio-init:/init:ro
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MC_CONFIG_DIR: /tmp/.mc
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      OWNER_MINIO_USER: ${OWNER_MINIO_USER:?set OWNER_MINIO_USER in .env}
+      OWNER_MINIO_PASSWORD: ${OWNER_MINIO_PASSWORD:?set OWNER_MINIO_PASSWORD in .env}
+      PROVIDER_MINIO_USER: ${PROVIDER_MINIO_USER:?set PROVIDER_MINIO_USER in .env}
+      PROVIDER_MINIO_PASSWORD: ${PROVIDER_MINIO_PASSWORD:?set PROVIDER_MINIO_PASSWORD in .env}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  # --------------------------------------------------------------- ledger --
+  ledger:
+    build:
+      context: ./services/ledger    # Hardhat node + auto-deployed AccessControl.sol
+    container_name: ledger
+    hostname: ledger
+    networks:
+      - net-ledger
+    expose:
+      - "8545"                 # JSON-RPC, reachable only from owner/provider/pre-proxy-*
+                                # inspect: docker compose exec ledger npx hardhat console --network localhost
+    volumes:
+      - ledger-data:/app/deployments
+    environment:
+      HARDHAT_CHAIN_ID: ${HARDHAT_CHAIN_ID:-31337}
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/deployments/AccessControl.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

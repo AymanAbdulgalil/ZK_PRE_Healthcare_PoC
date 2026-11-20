@@ -1,0 +1,8 @@
+streamlit>=1.38,<2
+requests>=2.31,<3
+boto3>=1.34,<2
+
+# pinned to versions verified against this service's code
+umbral-pre==0.11.0
+web3==7.16.0
+eth-account==0.13.7
