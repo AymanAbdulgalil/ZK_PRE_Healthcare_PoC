@@ -2,6 +2,16 @@
 
 Threshold proxy re-encryption (Umbral, 2-of-3) for sharing health records, with a four-function Solidity audit ledger and MinIO object storage. Everything runs under Docker Compose.
 
+> **Status: archived.** This was a semester research project, and it did not meet its objectives. It is kept here as a record and is no longer maintained.
+
+## Outcome
+
+The project fell short of what it set out to do, but it was worth the experience and what I learned along the way.
+
+**Verdict: the premise is valid, but this approach is not optimal.** Combining threshold proxy re-encryption, an on-chain access ledger and separate object storage does give patient-controlled, revocable sharing of health records. Other approaches, or a combination of them, can meet the same objectives with better performance and less overhead, setup time and complexity.
+
+The code below still builds and runs as described, for anyone who wants to study or reuse parts of it.
+
 ## Roles in the interface
 
 | Interface name | Compose service | URL |
