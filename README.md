@@ -26,8 +26,7 @@ The service, container, volume and environment-variable names (`owner`, `provide
 ## Run
 
 ```bash
-cp .env.example .env
-# then in .env give MINIO_ROOT_PASSWORD, OWNER_MINIO_PASSWORD and
+# in .env give MINIO_ROOT_PASSWORD, OWNER_MINIO_PASSWORD and
 # PROVIDER_MINIO_PASSWORD three different random values, e.g. from:  openssl rand -hex 24
 docker compose up --build
 docker compose logs minio-init      # shows the storage access checks (see below)
